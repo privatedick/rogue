@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+
+# Kontrollera om skriptet körs direkt istället för att sourcas
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    echo "Error: Detta skript måste köras med 'source' kommandot."
+    echo "Använd: source scripts/rebuild"
+    exit 1
+fi
+
+# Färger för output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+# Funktion för att skriva statusmeddelanden
+log() {
+    echo -e "${GREEN}[REBUILD]${NC} $1"
+}
+
+error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+    return 1
+}
+
+warn() {
+    echo -e "${YELLOW}[WARNING]${NC} $1"
+}
+
+info() {
+    echo -e "${BLUE}[INFO]${NC} $1"
+}
+
+# Kontrollera om vi är i rätt katalog
+if [ ! -f "pyproject.toml" ]; then
+    error "Du måste köra detta skript från projektets rotkatalog"
+    return 1
+fi
+
+# Kontrollera om poetry är installerat
+if ! command -v poetry &> /dev/null; then
+    error "Poetry är inte installerat. Installera det först: https://python-poetry.org/docs/#installation"
+    return 1
+fi
+
+# Skapa temporär katalog för backups
+BACKUP_DIR=$(mktemp -d)
+log "Använder temporär backup-katalog: $BACKUP_DIR"
+
+# Cleanup-funktion
+cleanup() {
+    if [ -d "$BACKUP_DIR" ]; then
+        rm -rf "$BACKUP_DIR"
+    fi
+}
+
+# Säkerhetskopia av .env om den finns
+if [ -f ".env" ]; then
+    log "Skapar backup av .env"
+    cp .env "$BACKUP_DIR/.env"
+fi
+
+# Deaktivera eventuell aktiv venv
+if [ -n "${VIRTUAL_ENV:-}" ]; then
+    log "Deaktiverar aktiv virtualenv"
+    deactivate 2>/dev/null || true
+fi
+
+# Lista och ta bort existerande venv
+log "Listar existerande Poetry virtualenvs..."
+if poetry env list &>/dev/null; then
+    while IFS= read -r line; do
+        # Extrahera venv-namnet utan "(Activated)" suffix
+        venv_name=$(echo "$line" | sed 's/ (Activated)$//')
+        if [ -n "$venv_name" ]; then
+            log "Tar bort virtualenv: $venv_name"
+            poetry env remove "$venv_name" || warn "Kunde inte ta bort $venv_name"
+        fi
+    done < <(poetry env list -n)
+fi
+
+# Rensa caches och byggfiler
+log "Rensar Python cache och byggfiler..."
+find . -type f -name "*.pyc" -delete
+find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+find . -type d -name "*.egg-info" -exec rm -rf {} + 2>/dev/null || true
+find . -type d -name ".pytest_cache" -exec rm -rf {} + 2>/dev/null || true
+find . -type d -name ".ruff_cache" -exec rm -rf {} + 2>/dev/null || true
+find . -type d -name ".mypy_cache" -exec rm -rf {} + 2>/dev/null || true
+rm -rf .coverage coverage.xml htmlcov/ dist/ build/ 2>/dev/null || true
+
+# Återställ .env från backup
+if [ -f "$BACKUP_DIR/.env" ]; then
+    log "Återställer .env från backup"
+    cp "$BACKUP_DIR/.env" .env
+fi
+
+# Installera projektet på nytt
+log "Installerar projektet..."
+poetry install
+
+# Konfigurera och aktivera venv
+VENV_PATH=$(poetry env info -p)
+if [ -n "$VENV_PATH" ]; then
+    # Skapa anpassad activate-fil
+    log "Konfigurerar virtualenv prompt..."
+    
+    # Spara original PS1 om det inte redan är sparat
+    if [ -z "${_OLD_VIRTUAL_PS1:-}" ]; then
+        export _OLD_VIRTUAL_PS1="${PS1:-}"
+    fi
+    
+    # Funktion för git-branch som matchar ditt format
+    parse_git_branch() {
+        git branch 2> /dev/null | sed -e '/^[^*]/d' -e 's/* \(.*\)/(\1 %)/'
+    }
+    
+    # Sätt PS1 för att matcha ditt format exakt
+    PS1='($(basename ${VIRTUAL_ENV})) \W$(parse_git_branch)\$ '
+    
+    # Aktivera venv
+    log "Aktiverar virtualenv..."
+    source "$VENV_PATH/bin/activate"
+    
+    # Testa quick-kommandot
+    if command -v quick &>/dev/null; then
+        log "quick-kommandot är tillgängligt"
+    else
+        warn "quick-kommandot kunde inte hittas. Du kan behöva köra 'poetry install' igen"
+    fi
+else
+    error "Kunde inte hitta Poetry virtualenv path"
+    cleanup
+    return 1
+fi
+
+# Städa upp
+cleanup
+
+echo -e "\n${GREEN}Rebuild komplett!${NC}"
+info "Du är nu i en aktiverad virtualenv med anpassad prompt"

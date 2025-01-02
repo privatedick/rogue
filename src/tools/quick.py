@@ -1,152 +1,183 @@
-"""Quick command line interface for rapid system control.
-
-This module provides a set of commands for quick system operations.
-Installation:
-    pip install --editable .
-
-Usage:
-    quick setup              # Initial setup
-    quick status            # Check system status
-    quick modify FILE TEXT  # Modify file
-    quick watch            # Watch for changes
-"""
+"""Quick command line interface for system control."""
 
 import os
-import sys
-import click
+import json
 import asyncio
-import subprocess
+import functools
 from pathlib import Path
 from typing import Optional
-import json
-from datetime import datetime
+import click
+from rich.console import Console
+from rich.table import Table
+from dotenv import load_dotenv
+import google.generativeai as genai
 
-def ensure_env():
-    """Ensure .env file exists with required variables."""
-    if not Path('.env').exists():
-        with open('.env', 'w') as f:
-            f.write("GEMINI_API_KEY=your_key_here\n")
-        click.echo("Created .env file - please add your Gemini API key")
-        sys.exit(1)
+from .system_health import SystemHealthCheck
+from .code_modifier import CodeModifier
 
-def ensure_directories():
-    """Ensure required directories exist."""
-    dirs = ['src', 'tests', 'logs', 'output', 'prompts', 'cache']
-    for d in dirs:
-        Path(d).mkdir(exist_ok=True)
+console = Console()
+
+# Configuration constants
+DEFAULT_CONFIG = {
+    "ai": {
+        "model": "gemini-2.0-flash-thinking-exp-1219",
+        "temperature": 0.7,
+        "top_p": 0.95,
+        "top_k": 64,
+        "max_tokens": 8192,
+    },
+    "watch": {
+        "enabled": True,
+        "paths": ["src", "tests"],
+        "ignore_patterns": ["*.pyc", "__pycache__", "*.log"],
+    },
+    "development": {
+        "auto_format": True,
+        "run_tests": True,
+        "check_types": True,
+    }
+}
+
+def async_command(f):
+    """Decorator for handling async click commands."""
+    @functools.wraps(f)
+    def wrapper(*args, **kwargs):
+        return asyncio.run(f(*args, **kwargs))
+    return wrapper
+
+def get_config_path() -> Path:
+    """Get path to config file."""
+    return Path("config.json")
+
+def load_config() -> dict:
+    """Load configuration from file."""
+    config_path = get_config_path()
+    if config_path.exists():
+        with open(config_path) as f:
+            return json.load(f)
+    return DEFAULT_CONFIG
+
+def save_config(config: dict) -> None:
+    """Save configuration to file."""
+    with open(get_config_path(), "w") as f:
+        json.dump(config, f, indent=2)
 
 @click.group()
 def cli():
-    """Quick commands for system control."""
+    """Quick system control interface."""
     pass
 
+@cli.group()
+def config():
+    """Configuration management commands."""
+    pass
+
+@config.command()
+def init():
+    """Initialize default configuration."""
+    if get_config_path().exists():
+        if not click.confirm("Config file exists. Overwrite?"):
+            return
+    
+    save_config(DEFAULT_CONFIG)
+    console.print("[green]Configuration initialized![/green]")
+    console.print("\nNext steps:")
+    console.print("1. Adjust AI settings in config.json if needed")
+    console.print("2. Run 'quick test ai' to verify AI functionality")
+
+@config.command()
+def show():
+    """Show current configuration."""
+    config = load_config()
+    
+    table = Table(title="Current Configuration")
+    table.add_column("Section")
+    table.add_column("Setting")
+    table.add_column("Value")
+    
+    for section, settings in config.items():
+        for key, value in settings.items():
+            table.add_row(section, key, str(value))
+    
+    console.print(table)
+
+@cli.group()
+def test():
+    """Test system functionality."""
+    pass
+
+@test.command()
+@async_command
+async def ai():
+    """Test AI functionality."""
+    load_dotenv()
+    
+    if not os.getenv("GEMINI_API_KEY"):
+        console.print("[red]Error: GEMINI_API_KEY not set in .env file[/red]")
+        return
+    
+    config = load_config()
+    test_prompt = "Say 'Hello, testing!' if you can read this."
+    
+    console.print("[yellow]Testing AI connection...[/yellow]")
+    try:
+        modifier = CodeModifier(config.get("ai", {}))
+        response = await modifier.generate_text(test_prompt)
+        
+        if response and "hello" in response.lower():
+            console.print("[green]AI test successful![/green]")
+            console.print(f"Response: {response}")
+        else:
+            console.print("[red]AI test failed: Unexpected or empty response[/red]")
+            if response:
+                console.print(f"Received: {response}")
+                
+    except Exception as e:
+        console.print(f"[red]Unexpected error: {str(e)}[/red]")
+
 @cli.command()
-def setup():
-    """Initial system setup."""
-    click.echo("Setting up system...")
-    ensure_env()
-    ensure_directories()
-    
-    # Create config if it doesn't exist
-    config = {
-        "watch_dirs": ["src", "tests"],
-        "ignore_patterns": ["*.pyc", "__pycache__", "*.log"],
-        "auto_suggestions": True,
-        "parallel_tasks": 3
-    }
-    
-    with open('config.json', 'w') as f:
-        json.dump(config, f, indent=2)
-    
-    click.echo("Setup complete! Don't forget to:")
-    click.echo("1. Add your GEMINI_API_KEY to .env")
-    click.echo("2. Adjust config.json if needed")
+@async_command
+async def status():
+    """Check system status."""
+    health_check = SystemHealthCheck()
+    await health_check.run_all_tests()
+    health_check.display_results()
 
 @cli.command()
 @click.argument('file_path')
 @click.argument('instructions')
-@click.option('--background/--no-background', default=False, help="Run in background")
-def modify(file_path: str, instructions: str, background: bool):
-    """Modify a file with AI assistance."""
-    cmd = ["python", "src/tools/code_modifier.py"]
+@click.option('--background', '-b', is_flag=True, help="Run in background")
+@async_command
+async def modify(file_path: str, instructions: str, background: bool):
+    """Modify code using AI."""
+    config = load_config()
+    modifier = CodeModifier(config["ai"])
     
     if background:
-        env = os.environ.copy()
-        env["FILE_PATH"] = file_path
-        env["INSTRUCTIONS"] = instructions
-        subprocess.Popen(cmd, env=env)
-        click.echo("Modification started in background")
-    else:
-        subprocess.run(cmd, input=f"{file_path}\n{instructions}\n".encode())
-
-@cli.command()
-@click.option('--path', default=None, help="Path to watch")
-def watch(path: Optional[str]):
-    """Watch files for changes and suggest improvements."""
-    if not path:
-        with open('config.json') as f:
-            config = json.load(f)
-            paths = config["watch_dirs"]
-    else:
-        paths = [path]
-    
-    cmd = ["python", "src/tools/file_watcher.py"] + paths
-    subprocess.Popen(cmd)
-    click.echo(f"Watching paths: {', '.join(paths)}")
-
-@cli.command()
-def status():
-    """Check system status."""
-    subprocess.run(["python", "src/tools/system_health.py"])
-
-@cli.command()
-@click.argument('task_file')
-def batch(task_file: str):
-    """Run batch of tasks from JSON file."""
-    with open(task_file) as f:
-        tasks = json.load(f)
-    
-    for task in tasks:
-        click.echo(f"Running task: {task['description']}")
-        modify(task['file'], task['instructions'], background=True)
-
-@cli.command()
-def cache():
-    """Show and manage operation cache."""
-    cache_dir = Path('cache')
-    cache_files = list(cache_dir.glob('*.json'))
-    
-    if not cache_files:
-        click.echo("Cache is empty")
+        # TODO: Implement background processing
+        console.print("[yellow]Background processing not yet implemented[/yellow]")
         return
     
-    click.echo("Recent operations:")
-    for cf in sorted(cache_files, key=lambda p: p.stat().st_mtime, reverse=True)[:5]:
-        with open(cf) as f:
-            data = json.load(f)
-        click.echo(f"{cf.stem}: {data['description']}")
+    console.print(f"[yellow]Modifying {file_path}...[/yellow]")
+    try:
+        result = await modifier.modify_file(Path(file_path), instructions)
+        if result:
+            console.print("[green]Modification successful![/green]")
+        else:
+            console.print("[red]Modification failed[/red]")
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
 
 @cli.command()
-@click.argument('description')
-@click.option('--files', '-f', multiple=True, help="Files to process")
-def task(description: str, files: tuple):
-    """Create and run a new task."""
-    task_data = {
-        "description": description,
-        "files": files,
-        "created": datetime.now().isoformat(),
-        "status": "pending"
-    }
+@click.option('--paths', '-p', multiple=True, help="Paths to watch")
+def watch(paths: tuple):
+    """Watch files for changes."""
+    config = load_config()
+    watch_paths = list(paths) if paths else config["watch"]["paths"]
     
-    task_file = Path('tasks') / f"task_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-    with open(task_file, 'w') as f:
-        json.dump(task_data, f, indent=2)
-    
-    click.echo(f"Created task: {task_file}")
-    
-    if files:
-        for file in files:
-            modify(file, description, background=True)
+    console.print(f"[yellow]Starting file watcher for: {', '.join(watch_paths)}[/yellow]")
+    # TODO: Implement file watching
+    console.print("[yellow]File watching not yet implemented[/yellow]")
 
 if __name__ == "__main__":
     cli()
