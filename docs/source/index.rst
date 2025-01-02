@@ -1,12 +1,5 @@
-.. rogue documentation master file, created by
-   sphinx-quickstart on Thu Jan  2 15:44:30 2025.
-   You can adapt this file completely to your liking, but it should at least
-   contain the root `toctree` directive.
-
-Welcome to rogue's documentation!
-==================================
-
-Contents:
+Welcome to Your Project's documentation!
+========================================
 
 .. toctree::
    :maxdepth: 2
@@ -15,7 +8,9 @@ Contents:
    installation
    usage
    api
-   contributing
+   core
+   modules
+   tools
 
 Indices and tables
 ==================
