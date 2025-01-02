@@ -5,8 +5,13 @@ from pathlib import Path
 from typing import Optional
 import logging
 from datetime import datetime
+
 from rich.console import Console
+from dotenv import load_dotenv
 import google.generativeai as genai
+
+# Ladda miljövariabler från .env-filen
+load_dotenv()
 
 class CodeModifier:
     """Manages AI-assisted code modifications."""
