@@ -1,0 +1,20 @@
+{
+  "tasks": [
+    {
+      "description": "Add error handling to all files",
+      "file": "src/tools/code_modifier.py",
+      "instructions": "Add comprehensive error handling and logging"
+    },
+    {
+      "description": "Improve documentation",
+      "file": "src/tools/quick.py",
+      "instructions": "Add detailed docstrings and usage examples"
+    },
+    {
+      "description": "Optimize file operations",
+      "file": "src/tools/file_watcher.py",
+      "instructions": "Improve file operation efficiency and reduce memory usage"
+    }
+  ]
+}
+
