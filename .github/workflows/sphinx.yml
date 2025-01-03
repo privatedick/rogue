@@ -12,11 +12,17 @@ jobs:
       with:
         python-version: '3.x'
     - name: Install Dependencies
-      run: pip install sphinx
-    - name: Build Documentation
-      run: sphinx-build -b html docs/source docs/build
-    - name: Deploy to GitHub Pages
+      run: |
+        sudo apt-get install texlive-latex-recommended texlive-latex-extra texlive-fonts-recommended latexmk
+        pip install sphinx
+        pip install sphinx_rtd_theme  # Om du använder ett specifikt tema
+    - name: Generate ReStructuredText files
+      run: |
+        sphinx-apidoc -o docs/source ../src/
+    - name: Build Text Documentation
+      run: sphinx-build -b text docs/source docs/build/text
+    - name: Deploy Text Documentation to GitHub Pages
       uses: peaceiris/actions-gh-pages@v3
       with:
-        deploy_key: ${{ secrets.ACTIONS_DEPLOY_KEY }}
-        publish_dir: docs/build/html
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        publish_dir: docs/build/text

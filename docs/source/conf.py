@@ -1,17 +1,17 @@
-import os
-import sys
-sys.path.insert(0, os.path.abspath('../../src'))
 
+# -- Project information -----------------------------------------------------
 project = 'Your Project Name'
-author = 'Your Name or Organization'
-release = '0.1'
+copyright = '2025, Your Name'
+author = 'Your Name'
 
-extensions = [
-    'sphinx.ext.autodoc',
-    'sphinx.ext.napoleon',
-    'sphinx.ext.viewcode',
-    'myst_parser',  # Lägg till detta för att hantera Markdown-filer
-]
+# -- General configuration ---------------------------------------------------
+extensions = ['sphinx.ext.autodoc', 'sphinx.ext.napoleon']
 
 templates_path = ['_templates']
-html_static_path = ['_static']
+exclude_patterns = []
+
+# -- Options for HTML output -------------------------------------------------
+html_theme = 'alabaster'
+
+# -- Options for LaTeX output ------------------------------------------------
+latex_engine = 'xelatex'
