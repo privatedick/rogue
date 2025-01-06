@@ -34,42 +34,36 @@ Indices and tables
 * :ref:`modindex`
 * :ref:`search`
 """,
-
     "api.rst": """API
 ===
 
 Innehåll för API-dokumentation...
 """,
-
     "core.rst": """Core
 ====
 
 Dokumentation för Core-modulen...
 """,
-
     "installation.rst": """Installation
 ============
 
 Innehåll för installationsanvisningar...
 """,
-
     "modules.rst": """Modules
 =======
 
 Dokumentation för Modules-modulen...
 """,
-
     "tools.rst": """Tools
 =====
 
 Dokumentation för Tools...
 """,
-
     "usage.rst": """Usage
 =====
 
 Innehåll för användningsanvisningar...
-"""
+""",
 }
 
 # Skapa .rst-filer med innehållet

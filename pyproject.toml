@@ -52,6 +52,8 @@ aiohttp = "^3.9.0"
 asyncio = "^3.4.3"
 loguru = "^0.7.3"
 sphinx = "^8.1.3"
+tenacity = "^9.0.0"
+google-genai = "^0.3.0"
 
 [tool.poetry.group.dev.dependencies]
 # Modern linting och formattering
@@ -78,6 +80,8 @@ rogue = "src.tools.quick:cli"
 [tool.ruff]
 target-version = "py39"
 line-length = 88
+
+[tool.ruff.lint]
 select = [
     "E",   # pycodestyle errors
     "W",   # pycodestyle warnings
@@ -87,7 +91,6 @@ select = [
     "C",   # flake8-comprehensions
     "UP",  # pyupgrade
     "N",   # pep8-naming
-    "COM", # flake8-commas
     "T20", # flake8-print
     "PT",  # flake8-pytest-style
     "RET", # flake8-return
@@ -96,6 +99,7 @@ select = [
 ignore = [
     "E501",  # Låt black hantera linjelängder
     "B008",  # Do not perform function call in argument defaults
+    "COM812", # Trailing comma konflikt med formatter
 ]
 unfixable = [
     "T20",  # Don't auto-remove print statements
@@ -109,11 +113,11 @@ exclude = [
     "dist",
 ]
 
-[tool.ruff.per-file-ignores]
+[tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401", "F403"]
 "tests/*" = ["T20"]
 
-[tool.ruff.isort]
+[tool.ruff.lint.isort]
 known-first-party = ["src"]
 section-order = ["future", "standard-library", "third-party", "first-party", "local-folder"]
 combine-as-imports = true
