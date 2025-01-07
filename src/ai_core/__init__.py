@@ -1,3 +1,6 @@
-"""Project setup package."""
+"""AI core functionality."""
 
-__version__ = "0.1.0"
+from .thoughts_manager import Thought, ThoughtsManager
+from .ai_manager import AIManager
+
+__all__ = ['Thought', 'ThoughtsManager', 'AIManager']

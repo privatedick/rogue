@@ -1,96 +1,101 @@
-"""Thought Management System.
-
-This module provides comprehensive management of AI thoughts and reasoning patterns,
-including storage, analysis, and pattern recognition. It supports model-specific
-thought processing and advanced reasoning analysis.
-"""
-
+# Standardbibliotek
 import json
 import logging
-from abc import ABC, abstractmethod
-from dataclasses import asdict, dataclass
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Generic, Optional, TypeVar
+from typing import Any, Dict, List, Optional, Tuple
 
+# Tredjepartsbibliotek
 import aiosqlite
-from tenacity import retry, stop_after_attempt, wait_exponential
 
-T = TypeVar("T")
+# Tredjepartsbibliotek
+import aiosqlite
 
+# Lokala imports
+# from .exceptions import StorageError, ValidationError
+# from .models import Thought
+class ThoughtError(Exception):
+    """Bas-klass för alla thought-relaterade fel"""
+    pass
+
+class StorageError(ThoughtError):
+    """När något går fel med databasen"""
+    def __init__(self, operation: str, details: str = None):
+        self.operation = operation
+        self.details = details or {}
+        message = f"Databasfel i operation '{operation}': {details}"
+        super().__init__(message)
+
+class ValidationError(ThoughtError):
+    """När en thought inte uppfyller kraven"""
+    def __init__(self, reason: str, details: str = None):
+        self.reason = reason
+        self.details = details or {}
+        message = f"Validering misslyckades: {reason}"
+        super().__init__(message)
 
 @dataclass
 class Thought:
-    """Container for AI thought data.
+    id: Optional[int] = None
+    content: str = ""
+    model: str = ""
+    context: Dict[str, Any] = field(default_factory=dict)
+    created_at: datetime = field(default_factory=datetime.now)
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
-    Attributes:
-        id: Unique identifier
-        model: Name of the AI model
-        content: Thought content
-        metadata: Additional metadata
-        created_at: Creation timestamp
-        category: Thought category
-        confidence: Confidence score
-        related_code: Associated code if any
-    """
+    async def validate(self) -> None:
+        """Validera alla fält."""
+        # self.logger.debug(f"Validating thought: {self.content[:50]}...")
+        
+        if not self.content or not self.content.strip():
+            raise ValidationError("content", "Cannot be empty")
+        
+        if len(self.content) > 10000:  # Lämplig maxgräns
+            raise ValidationError("content", "Content too long")
+            
+        if not self.model or not self.model.strip():
+            raise ValidationError("model", "Cannot be empty")
+            
+        if not isinstance(self.context, dict):
+            raise ValidationError("context", "Must be a dictionary")
 
-    id: Optional[int]
-    model: str
-    content: str
-    metadata: dict[str, Any]
-    created_at: datetime
-    category: str
-    confidence: float
-    related_code: Optional[str] = None
-
-    def to_dict(self) -> dict[str, Any]:
-        """Convert thought to dictionary."""
-        return asdict(self)
-
-
+# 1. ASYNKRON DATABASHANTERING
 class DatabaseConnection:
-    """Manages database connections and operations."""
-
-    def __init__(self, db_path: str):
-        """Initialize database connection manager.
-
-        Args:
-            db_path: Path to SQLite database
-        """
+    def __init__(self, db_path: str) -> None:
         self.db_path = db_path
-        self.logger = logging.getLogger(__name__)
+        self.conn: Optional[aiosqlite.Connection] = None
 
-    async def __aenter__(self) -> "aiosqlite.Connection":
-        """Enter async context and establish connection."""
+    async def __aenter__(self) -> 'DatabaseConnection':
         self.conn = await aiosqlite.connect(self.db_path)
         self.conn.row_factory = aiosqlite.Row
-        return self.conn
+        return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
-        """Exit async context and close connection."""
-        await self.conn.close()
+        if self.conn:
+            await self.conn.close()
 
+    async def execute(self, query: str, parameters: Optional[Tuple] = None) -> aiosqlite.Cursor:
+        if self.conn is None:
+            raise StorageError("execute", "No active connection")
+        try:
+            cursor = await self.conn.execute(query, parameters or ())
+            return cursor
+        except aiosqlite.Error as e:
+            raise StorageError("execute", f"SQL Error: {e}")
 
-class Repository(Generic[T], ABC):
-    """Abstract base class for data repositories."""
+# 2. TRANSAKTIONSHANTERING
+@asynccontextmanager
+async def transaction(conn: aiosqlite.Connection):
+    """Asynkron transaktionshantering."""
+    if conn is None:
+      raise StorageError("transaction", "No active connection")
+    
+    async with conn.transaction():
+        yield conn
 
-    @abstractmethod
-    async def save(self, item: T) -> bool:
-        """Save item to storage."""
-        raise NotImplementedError
-
-    @abstractmethod
-    async def get(self, item_id: int) -> Optional[T]:
-        """Retrieve item by ID."""
-        raise NotImplementedError
-
-    @abstractmethod
-    async def delete(self, item_id: int) -> bool:
-        """Delete item by ID."""
-        raise NotImplementedError
-
-
-class ThoughtRepository(Repository[Thought]):
+class ThoughtRepository:
     """Repository for thought storage and retrieval."""
 
     def __init__(self, db_path: str):
@@ -101,350 +106,217 @@ class ThoughtRepository(Repository[Thought]):
         """
         self.db_path = db_path
         self.logger = logging.getLogger(__name__)
+        self.conn: Optional[aiosqlite.Connection] = None
 
     async def initialize(self) -> None:
         """Initialize database schema."""
-        async with DatabaseConnection(self.db_path) as conn:
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS thoughts (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    model TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    metadata TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    category TEXT NOT NULL,
-                    confidence REAL NOT NULL,
-                    related_code TEXT
-                )
-            """)
-            await conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_thoughts_model 
-                ON thoughts(model)
-            """)
-            await conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_thoughts_category 
-                ON thoughts(category)
-            """)
-            await conn.commit()
-
-    @retry(
-        stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10)
-    )
-    async def save(self, thought: Thought) -> bool:
-        """Save thought to database.
-
-        Args:
-            thought: Thought to save
-
-        Returns:
-            bool: True if successful
-        """
         try:
-            async with DatabaseConnection(self.db_path) as conn:
-                query = """
-                    INSERT INTO thoughts (
-                        model, content, metadata, created_at,
-                        category, confidence, related_code
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                """
-                params = (
-                    thought.model,
-                    thought.content,
-                    json.dumps(thought.metadata),
-                    thought.created_at.isoformat(),
-                    thought.category,
-                    thought.confidence,
-                    thought.related_code,
-                )
-                await conn.execute(query, params)
-                await conn.commit()
-                return True
-        except Exception as e:
-            self.logger.error("Failed to save thought: %s", str(e))
-            return False
+            async with DatabaseConnection(self.db_path) as db:
+              await db.execute("""
+                  CREATE TABLE IF NOT EXISTS thoughts (
+                      id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      content TEXT NOT NULL,
+                      model TEXT NOT NULL,
+                      context TEXT NOT NULL,
+                      created_at TEXT NOT NULL,
+                      metadata TEXT NOT NULL,
+                      category TEXT,
+                      confidence REAL,
+                      related_code TEXT
+                  )
+              """)
+
+              await db.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS thoughts_fts USING fts5(
+                    content,
+                    model,
+                    created_at UNINDEXED,
+                    metadata UNINDEXED,
+                    content='thoughts'
+                );
+              """)
+              await db.conn.commit()
+        except aiosqlite.Error as e:
+            raise StorageError("schema_init", f"Failed to initialize db: {e}")
+
+    # 4. FÖRBÄTTRAD FELHANTERING I REPOSITORY
+    async def save(self, thought: Thought) -> int:
+        try:
+           async with DatabaseConnection(self.db_path) as db:
+                async with transaction(db.conn) as conn:
+                    cursor = await conn.execute(
+                        """
+                        INSERT INTO thoughts (content, model, context, created_at, metadata, category, confidence, related_code)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            thought.content,
+                            thought.model,
+                            json.dumps(thought.context),
+                            thought.created_at,
+                            json.dumps(thought.metadata),
+                            thought.category,
+                            thought.confidence,
+                            thought.related_code,
+                        )
+                    )
+                    thought_id = cursor.lastrowid
+
+                    await conn.execute(
+                         """
+                         INSERT INTO thoughts_fts (rowid, content, model, created_at, metadata)
+                         VALUES (?, ?, ?, ?, ?)
+                         """,
+                         (
+                             thought_id,
+                             thought.content,
+                             thought.model,
+                             thought.created_at,
+                             json.dumps(thought.metadata),
+                        )
+                    )
+                    await db.conn.commit()
+                    return thought_id
+
+        except aiosqlite.Error as e:
+            raise StorageError("save", f"Failed to save thought: {e}")
+        except json.JSONDecodeError as e:
+             raise ValidationError("context", f"Invalid JSON data: {e}")
 
     async def get(self, thought_id: int) -> Optional[Thought]:
-        """Retrieve thought by ID.
-
-        Args:
-            thought_id: ID of thought to retrieve
-
-        Returns:
-            Optional[Thought]: Retrieved thought or None
-        """
+        """Retrieve a specific thought."""
         try:
-            async with DatabaseConnection(self.db_path) as conn:
-                query = "SELECT * FROM thoughts WHERE id = ?"
-                async with conn.execute(query, (thought_id,)) as cursor:
-                    row = await cursor.fetchone()
-                    if row:
-                        return self._row_to_thought(row)
-                    return None
-        except Exception as e:
-            self.logger.error("Failed to retrieve thought: %s", str(e))
-            return None
+            async with DatabaseConnection(self.db_path) as db:
+              cursor = await db.execute(
+                  "SELECT * FROM thoughts WHERE id = ?", (thought_id,)
+              )
+              row = await cursor.fetchone()
+              if row:
+                return self._row_to_thought(row)
+              return None
+        except aiosqlite.Error as e:
+             raise StorageError("get", f"Failed to get thought: {e}")
 
     async def delete(self, thought_id: int) -> bool:
-        """Delete thought by ID.
+        """Delete thought by ID."""
+        try:
+             async with DatabaseConnection(self.db_path) as db:
+                async with transaction(db.conn) as conn:
+                   await conn.execute("DELETE FROM thoughts WHERE id = ?", (thought_id,))
+                   await conn.execute("DELETE FROM thoughts_fts WHERE rowid = ?", (thought_id,))
+                   await db.conn.commit()
+                   return True
+        except aiosqlite.Error as e:
+            raise StorageError("delete", f"Failed to delete thought: {e}")
+    
+    async def _row_to_thought(self, row: aiosqlite.Row) -> Thought:
+        """Convert a database row to a Thought object."""
+        try:
+             return Thought(
+                  id=row["id"],
+                  content=row["content"],
+                  model=row["model"],
+                  context=json.loads(row["context"]),
+                  created_at=datetime.fromisoformat(row["created_at"]),
+                  metadata = json.loads(row["metadata"]) if row["metadata"] else None,
+                  category=row["category"],
+                  confidence=row["confidence"],
+                  related_code=row["related_code"]
+              )
+        except (json.JSONDecodeError, TypeError) as e:
+            raise StorageError("convert", f"Failed to convert row to thought: {e}")
+    
+    async def cleanup(self):
+        if self.conn:
+           await self.conn.close()
+
+    # 6. SÖKFUNKTIONALITET
+    async def search_thoughts(
+        self,
+        query: Optional[str] = None,
+        model: Optional[str] = None,
+        limit: int = 100
+    ) -> List[Thought]:
+        """Sök efter thoughts med flexibla kriterier."""
+        try:
+            conditions = []
+            params = []
+            
+            if query:
+                conditions.append("content MATCH ?")
+                params.append(query)
+                
+            if model:
+                conditions.append("model = ?")
+                params.append(model)
+                
+            where_clause = " AND ".join(conditions) if conditions else "1=1"
+            
+            async with DatabaseConnection(self.db_path) as db:
+               cursor = await db.execute(
+                    f"""
+                    SELECT *
+                    FROM thoughts_fts 
+                    WHERE {where_clause}
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (*params, limit)
+               )
+               rows = await cursor.fetchall()
+               return [self._row_to_thought(row) for row in rows]
+            
+        except Exception as e:
+           self.logger.error(f"Search failed: {e}")
+           raise StorageError("search", f"Failed to search thoughts: {e}")
+        
+    async def get_thought_history(
+        self,
+        model: Optional[str] = None,
+        category: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[Thought]:
+        """Retrieve thought history with optional filtering.
 
         Args:
-            thought_id: ID of thought to delete
+            model: Filter by model name
+            category: Filter by category
+            limit: Maximum number of thoughts to retrieve
 
         Returns:
-            bool: True if successful
+            list[Thought]: Retrieved thoughts
         """
         try:
-            async with DatabaseConnection(self.db_path) as conn:
-                query = "DELETE FROM thoughts WHERE id = ?"
-                await conn.execute(query, (thought_id,))
-                await conn.commit()
-                return True
-        except Exception as e:
-            self.logger.error("Failed to delete thought: %s", str(e))
-            return False
+            conditions = []
+            params = []
+            
+            if model:
+                conditions.append("model = ?")
+                params.append(model)
+            if category:
+                conditions.append("category = ?")
+                params.append(category)
+            
+            where_clause = " AND ".join(conditions) if conditions else "1=1"
+            
+            async with DatabaseConnection(self.db_path) as db:
+                cursor = await db.execute(
+                     f"""
+                    SELECT *
+                    FROM thoughts
+                    WHERE {where_clause}
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                     (*params, limit)
+                 )
+                rows = await cursor.fetchall()
+                return [self._row_to_thought(row) for row in rows]
 
-    def _row_to_thought(self, row: aiosqlite.Row) -> Thought:
-        """Convert database row to Thought object.
+        except aiosqlite.Error as e:
+           self.logger.error(f"Failed to retrieve thought history: {e}")
+           raise StorageError("get_history", f"Failed to retrieve thought history: {e}")
 
-        Args:
-            row: Database row
-
-        Returns:
-            Thought: Converted thought object
-        """
-        return Thought(
-            id=row["id"],
-            model=row["model"],
-            content=row["content"],
-            metadata=json.loads(row["metadata"]),
-            created_at=datetime.fromisoformat(row["created_at"]),
-            category=row["category"],
-            confidence=row["confidence"],
-            related_code=row["related_code"],
-        )
-
-
-class ThoughtAnalyzer:
-    """Analyzes thought patterns and reasoning."""
-
-    def __init__(self):
-        """Initialize thought analyzer."""
-        self.logger = logging.getLogger(__name__)
-
-    def analyze_reasoning(self, thought: Thought) -> dict[str, Any]:
-        """Analyze reasoning patterns in thought.
-
-        Args:
-            thought: Thought to analyze
-
-        Returns:
-            dict[str, Any]: Analysis results
-        """
-        try:
-            return {
-                "reasoning_type": self._classify_reasoning(thought),
-                "key_concepts": self._extract_concepts(thought),
-                "decision_factors": self._extract_decisions(thought),
-                "confidence_metrics": self._calculate_confidence(thought),
-            }
-        except Exception as e:
-            self.logger.error("Reasoning analysis failed: %s", str(e))
-            return {}
-
-    def _classify_reasoning(self, thought: Thought) -> str:
-        """Classify reasoning type.
-
-        Args:
-            thought: Thought to classify
-
-        Returns:
-            str: Reasoning classification
-        """
-        content_lower = thought.content.lower()
-
-        if any(word in content_lower for word in ["because", "since", "therefore"]):
-            return "deductive"
-        if any(word in content_lower for word in ["might", "could", "possibly"]):
-            return "speculative"
-        if any(word in content_lower for word in ["observed", "noticed", "seen"]):
-            return "empirical"
-
-        return "unknown"
-
-    def _extract_concepts(self, thought: Thought) -> list[str]:
-        """Extract key concepts from thought.
-
-        Args:
-            thought: Thought to analyze
-
-        Returns:
-            list[str]: Extracted concepts
-        """
-        # Implementation would use NLP techniques
-        return []
-
-    def _extract_decisions(self, thought: Thought) -> list[str]:
-        """Extract decision points from thought.
-
-        Args:
-            thought: Thought to analyze
-
-        Returns:
-            list[str]: Extracted decisions
-        """
-        # Implementation would identify decision points
-        return []
-
-    def _calculate_confidence(self, thought: Thought) -> dict[str, float]:
-        """Calculate confidence metrics.
-
-        Args:
-            thought: Thought to analyze
-
-        Returns:
-            dict[str, float]: Confidence metrics
-        """
-        return {
-            "overall": thought.confidence,
-            "reasoning": self._assess_reasoning_confidence(thought),
-            "implementation": self._assess_implementation_confidence(thought),
-        }
-
-    def _assess_reasoning_confidence(self, thought: Thought) -> float:
-        """Assess confidence in reasoning.
-
-        Args:
-            thought: Thought to assess
-
-        Returns:
-            float: Confidence score
-        """
-        # Implementation would assess reasoning quality
-        return 0.0
-
-    def _assess_implementation_confidence(self, thought: Thought) -> float:
-        """Assess confidence in implementation.
-
-        Args:
-            thought: Thought to assess
-
-        Returns:
-            float: Confidence score
-        """
-        if not thought.related_code:
-            return 0.0
-        # Implementation would assess code quality
-        return 0.0
-
-
-class ThoughtProcessor:
-    """Processes and categorizes thoughts based on model and context."""
-
-    def __init__(self, model_configs: dict[str, Any]):
-        """Initialize thought processor.
-
-        Args:
-            model_configs: Model-specific configurations
-        """
-        self.model_configs = model_configs
-        self.logger = logging.getLogger(__name__)
-
-    def process_thought(
-        self, content: str, model: str, context: dict[str, Any]
-    ) -> Optional[Thought]:
-        """Process and categorize a thought.
-
-        Args:
-            content: Thought content
-            model: Model name
-            context: Generation context
-
-        Returns:
-            Optional[Thought]: Processed thought or None
-        """
-        try:
-            category = self._categorize_thought(content, model)
-            confidence = self._calculate_base_confidence(model, context)
-
-            return Thought(
-                id=None,
-                model=model,
-                content=content,
-                metadata=self._extract_metadata(content, context),
-                created_at=datetime.now(),
-                category=category,
-                confidence=confidence,
-                related_code=context.get("related_code"),
-            )
-        except Exception as e:
-            self.logger.error("Thought processing failed: %s", str(e))
-            return None
-
-    def _categorize_thought(self, content: str, model: str) -> str:
-        """Categorize thought content.
-
-        Args:
-            content: Thought content
-            model: Model name
-
-        Returns:
-            str: Thought category
-        """
-        content_lower = content.lower()
-
-        if "decision" in content_lower:
-            return "decision"
-        if "analysis" in content_lower:
-            return "analysis"
-        if "recommendation" in content_lower:
-            return "recommendation"
-
-        return "general"
-
-    def _calculate_base_confidence(self, model: str, context: dict[str, Any]) -> float:
-        """Calculate base confidence score.
-
-        Args:
-            model: Model name
-            context: Generation context
-
-        Returns:
-            float: Confidence score
-        """
-        base_score = self.model_configs.get(model, {}).get("base_confidence", 0.5)
-
-        modifiers = {"has_context": 0.1, "has_code": 0.2, "is_detailed": 0.1}
-
-        final_score = base_score
-        if context.get("context"):
-            final_score += modifiers["has_context"]
-        if context.get("related_code"):
-            final_score += modifiers["has_code"]
-        if len(context) > 3:
-            final_score += modifiers["is_detailed"]
-
-        return min(final_score, 1.0)
-
-    def _extract_metadata(
-        self, content: str, context: dict[str, Any]
-    ) -> dict[str, Any]:
-        """Extract metadata from thought and context.
-
-        Args:
-            content: Thought content
-            context: Generation context
-
-        Returns:
-            dict[str, Any]: Extracted metadata
-        """
-        return {
-            "length": len(content),
-            "timestamp": datetime.now().isoformat(),
-            "context_type": context.get("type", "unknown"),
-            "generation_params": context.get("params", {}),
-            "source_file": context.get("file"),
-            "task_type": context.get("task_type", "unknown"),
-        }
 
 
 class ThoughtsManager:
@@ -457,324 +329,120 @@ class ThoughtsManager:
             db_path: Path to thoughts database
             model_configs: Model configurations
         """
+        self.db_path = db_path
         self.repository = ThoughtRepository(db_path)
-        self.analyzer = ThoughtAnalyzer()
-        self.processor = ThoughtProcessor(model_configs or {})
         self.logger = logging.getLogger(__name__)
 
-    async def initialize(self) -> None:
-        """Initialize manager and database."""
-        await self.repository.initialize()
-
-    async def save_thought(
-        self, content: str, model: str, context: dict[str, Any]
-    ) -> bool:
-        """Process and save a thought.
-
-        Args:
-            content: Thought content
-            model: Model name
-            context: Generation context
-
-        Returns:
-            bool: True if successful
-        """
+    async def initialize(self):
+         await self.repository.initialize()
+    
+    async def save_thought(self, content: str, model: str, context: dict, metadata: Optional[dict] = None, category: Optional[str] = None, confidence: Optional[float] = None, related_code: Optional[str] = None ) -> int:
+        """Process and save a thought."""
         try:
-            thought = self.processor.process_thought(content, model, context)
-            if thought:
-                return await self.repository.save(thought)
-            return False
+            thought = Thought(
+                content=content,
+                model=model,
+                context=context,
+                metadata = metadata or {},
+                category = category,
+                confidence = confidence,
+                related_code = related_code
+            )
+            await thought.validate()
+            self.logger.info(f"Saving thought: {content[:50]}...")
+            thought_id = await self.repository.save(thought)
+            return thought_id
         except Exception as e:
-            self.logger.error("Failed to save thought: %s", str(e))
-            return False
+            self.logger.error(f"Failed to save thought: {e}")
+            raise e
 
-    async def analyze_thought(self, thought_id: int) -> Optional[dict[str, Any]]:
-        """Analyze a specific thought.
-
-        Args:
-            thought_id: ID of thought to analyze
-
-        Returns:
-            Optional[dict[str, Any]]: Analysis results
-        """
+    async def get_thought(self, thought_id: int) -> Optional[Thought]:
+        """Retrieve a specific thought."""
         try:
-            thought = await self.repository.get(thought_id)
-            if thought:
-                return self.analyzer.analyze_reasoning(thought)
-            return None
+             self.logger.info(f"Getting thought id: {thought_id}")
+             thought = await self.repository.get(thought_id)
+             return thought
         except Exception as e:
-            self.logger.error("Failed to analyze thought: %s", str(e))
-            return None
+           self.logger.error(f"Failed to get thought: {e}")
+           raise e
+
+    async def delete_thought(self, thought_id: int) -> bool:
+        """Delete thought by ID."""
+        try:
+            self.logger.info(f"Deleting thought: {thought_id}")
+            deleted = await self.repository.delete(thought_id)
+            return deleted
+        except Exception as e:
+           self.logger.error(f"Failed to delete thought: {e}")
+           raise e
+
+    async def search_thoughts(
+        self,
+        query: Optional[str] = None,
+        model: Optional[str] = None,
+        limit: int = 100
+    ) -> List[Thought]:
+        """Sök efter thoughts med flexibla kriterier."""
+        try:
+            self.logger.info(f"Searching thoughts with query: {query}, model:{model}, limit:{limit}")
+            return await self.repository.search_thoughts(query, model, limit)
+        except Exception as e:
+           self.logger.error(f"Search failed in manager: {e}")
+           raise e
 
     async def get_thought_history(
         self,
         model: Optional[str] = None,
         category: Optional[str] = None,
         limit: int = 100,
-    ) -> list[Thought]:
-        """Retrieve thought history with optional filtering.
+    ) -> List[Thought]:
+       """Retrieve thought history with optional filtering."""
+       try:
+           self.logger.info(f"Getting thought history (model={model}, category={category}, limit={limit})")
+           return await self.repository.get_thought_history(model, category, limit)
+       except Exception as e:
+           self.logger.error(f"Failed to get thought history: {e}")
+           raise e
 
-        Args:
-            model: Filter by model name
-            category: Filter by category
-            limit: Maximum number of thoughts to retrieve
-
-        Returns:
-            list[Thought]: Retrieved thoughts
-        """
-        try:
-            async with DatabaseConnection(self.repository.db_path) as conn:
-                query = ["SELECT * FROM thoughts"]
-                params = []
-
-                if model or category:
-                    conditions = []
-                    if model:
-                        conditions.append("model = ?")
-                        params.append(model)
-                    if category:
-                        conditions.append("category = ?")
-                        params.append(category)
-                    query.append("WHERE " + " AND ".join(conditions))
-
-                query.append("ORDER BY created_at DESC LIMIT ?")
-                params.append(limit)
-
-                async with conn.execute(" ".join(query), params) as cursor:
-                    rows = await cursor.fetchall()
-                    return [self.repository._row_to_thought(row) for row in rows]
-
-        except Exception as e:
-            self.logger.error("Failed to retrieve thought history: %s", str(e))
-            return []
-
-    async def find_similar_thoughts(
-        self, content: str, threshold: float = 0.7, limit: int = 5
-    ) -> list[Thought]:
-        """Find similar thoughts using content similarity.
-
-        Args:
-            content: Content to compare against
-            threshold: Similarity threshold
-            limit: Maximum number of results
-
-        Returns:
-            list[Thought]: Similar thoughts
-        """
-        try:
-            # Here we would implement more sophisticated similarity matching
-            # For now, we use simple substring matching
-            async with DatabaseConnection(self.repository.db_path) as conn:
-                query = """
-                    SELECT * FROM thoughts 
-                    WHERE content LIKE ? 
-                    ORDER BY created_at DESC 
-                    LIMIT ?
-                """
-                pattern = f"%{content}%"
-                async with conn.execute(query, (pattern, limit)) as cursor:
-                    rows = await cursor.fetchall()
-                    return [self.repository._row_to_thought(row) for row in rows]
-
-        except Exception as e:
-            self.logger.error("Failed to find similar thoughts: %s", str(e))
-            return []
-
-    async def get_thought_patterns(self) -> dict[str, Any]:
-        """Analyze patterns in stored thoughts.
-
-        Returns:
-            dict[str, Any]: Pattern analysis results
-        """
-        try:
-            async with DatabaseConnection(self.repository.db_path) as conn:
-                patterns = {
-                    "categories": await self._analyze_categories(conn),
-                    "models": await self._analyze_models(conn),
-                    "confidence": await self._analyze_confidence(conn),
-                    "temporal": await self._analyze_temporal_patterns(conn),
-                }
-                return patterns
-
-        except Exception as e:
-            self.logger.error("Failed to analyze thought patterns: %s", str(e))
-            return {}
-
-    async def _analyze_categories(self, conn: "aiosqlite.Connection") -> dict[str, int]:
-        """Analyze thought categories.
-
-        Args:
-            conn: Database connection
-
-        Returns:
-            dict[str, int]: Category frequencies
-        """
-        async with conn.execute(
-            "SELECT category, COUNT(*) as count FROM thoughts GROUP BY category"
-        ) as cursor:
-            rows = await cursor.fetchall()
-            return {row["category"]: row["count"] for row in rows}
-
-    async def _analyze_models(
-        self, conn: "aiosqlite.Connection"
-    ) -> dict[str, dict[str, Any]]:
-        """Analyze model performance.
-
-        Args:
-            conn: Database connection
-
-        Returns:
-            dict[str, dict[str, Any]]: Model statistics
-        """
-        async with conn.execute("""
-            SELECT model,
-                   COUNT(*) as count,
-                   AVG(confidence) as avg_confidence,
-                   MIN(created_at) as first_used,
-                   MAX(created_at) as last_used
-            FROM thoughts 
-            GROUP BY model
-        """) as cursor:
-            rows = await cursor.fetchall()
-            return {
-                row["model"]: {
-                    "count": row["count"],
-                    "avg_confidence": row["avg_confidence"],
-                    "first_used": row["first_used"],
-                    "last_used": row["last_used"],
-                }
-                for row in rows
-            }
-
-    async def _analyze_confidence(
-        self, conn: "aiosqlite.Connection"
-    ) -> dict[str, float]:
-        """Analyze confidence scores.
-
-        Args:
-            conn: Database connection
-
-        Returns:
-            dict[str, float]: Confidence statistics
-        """
-        async with conn.execute("""
-            SELECT 
-                AVG(confidence) as avg_confidence,
-                MIN(confidence) as min_confidence,
-                MAX(confidence) as max_confidence
-            FROM thoughts
-        """) as cursor:
-            row = await cursor.fetchone()
-            return {
-                "average": row["avg_confidence"],
-                "minimum": row["min_confidence"],
-                "maximum": row["max_confidence"],
-            }
-
-    async def _analyze_temporal_patterns(
-        self, conn: "aiosqlite.Connection"
-    ) -> dict[str, Any]:
-        """Analyze temporal patterns in thoughts.
-
-        Args:
-            conn: Database connection
-
-        Returns:
-            dict[str, Any]: Temporal analysis results
-        """
-        async with conn.execute("""
-            SELECT 
-                strftime('%Y-%m', created_at) as month,
-                COUNT(*) as count,
-                AVG(confidence) as avg_confidence
-            FROM thoughts 
-            GROUP BY month 
-            ORDER BY month DESC 
-            LIMIT 12
-        """) as cursor:
-            rows = await cursor.fetchall()
-            return {
-                "monthly_counts": {
-                    row["month"]: {
-                        "count": row["count"],
-                        "avg_confidence": row["avg_confidence"],
-                    }
-                    for row in rows
-                }
-            }
-
-    async def cleanup_old_thoughts(self, days: int = 30) -> int:
-        """Remove thoughts older than specified days.
-
-        Args:
-            days: Age threshold in days
-
-        Returns:
-            int: Number of thoughts removed
-        """
-        try:
-            async with DatabaseConnection(self.repository.db_path) as conn:
-                query = """
-                    DELETE FROM thoughts 
-                    WHERE created_at < datetime('now', ?)
-                """
-                cursor = await conn.execute(query, (f"-{days} days",))
-                await conn.commit()
-                return cursor.rowcount
-
-        except Exception as e:
-            self.logger.error("Failed to cleanup old thoughts: %s", str(e))
-            return 0
+    async def cleanup(self):
+        """Cleanup resurser."""
+        self.logger.info("Cleaning up resources")
+        if hasattr(self, 'repository'):
+            await self.repository.cleanup()
 
     async def export_thoughts(self, output_path: Path, format: str = "json") -> bool:
-        """Export thoughts to file.
+       """Export thoughts to file."""
+       try:
+           self.logger.info(f"Exporting thoughts to {output_path} in format {format}")
+           thoughts = await self.get_thought_history(limit=10000)
+           
+           if format == "json":
+               data = [thought.to_dict() for thought in thoughts]
+               output_path.write_text(json.dumps(data, indent=2))
+               return True
+           
+           if format == "csv":
+               import csv
+               
+               with output_path.open("w", newline="") as f:
+                   writer = csv.writer(f)
+                   writer.writerow([
+                       "id", "model", "content", "category", "confidence", "created_at"
+                       ])
+                   for thought in thoughts:
+                       writer.writerow([
+                           thought.id,
+                           thought.model,
+                           thought.content,
+                           thought.category,
+                           thought.confidence,
+                           thought.created_at.isoformat()
+                        ])
+               return True
 
-        Args:
-            output_path: Path to output file
-            format: Export format ('json' or 'csv')
-
-        Returns:
-            bool: True if successful
-        """
-        try:
-            thoughts = await self.get_thought_history(limit=10000)
-
-            if format == "json":
-                data = [thought.to_dict() for thought in thoughts]
-                output_path.write_text(json.dumps(data, indent=2))
-                return True
-
-            if format == "csv":
-                import csv
-
-                with output_path.open("w", newline="") as f:
-                    writer = csv.writer(f)
-                    writer.writerow(
-                        [
-                            "id",
-                            "model",
-                            "content",
-                            "category",
-                            "confidence",
-                            "created_at",
-                        ]
-                    )
-                    for thought in thoughts:
-                        writer.writerow(
-                            [
-                                thought.id,
-                                thought.model,
-                                thought.content,
-                                thought.category,
-                                thought.confidence,
-                                thought.created_at.isoformat(),
-                            ]
-                        )
-                return True
-
-            self.logger.error("Unsupported export format: %s", format)
-            return False
-
-        except Exception as e:
-            self.logger.error("Failed to export thoughts: %s", str(e))
-            return False
+           self.logger.error(f"Unsupported export format: {format}")
+           return False
+       except Exception as e:
+           self.logger.error(f"Failed to export thoughts: {e}")
+           return False
+    

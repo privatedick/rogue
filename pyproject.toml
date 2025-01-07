@@ -54,6 +54,7 @@ loguru = "^0.7.3"
 sphinx = "^8.1.3"
 tenacity = "^9.0.0"
 google-genai = "^0.3.0"
+aiosqlite = "^0.20.0"
 
 [tool.poetry.group.dev.dependencies]
 # Modern linting och formattering
