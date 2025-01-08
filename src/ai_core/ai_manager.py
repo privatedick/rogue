@@ -14,7 +14,7 @@ try:
     import black
     import google.generativeai as genai
     import psutil
-    from google.ai.generativelanguage import BlockedPromptException
+    import google.generativeai as genai
     from google.generativeai.types import GenerationConfig
     from tenacity import retry, stop_after_attempt, wait_exponential
 except ImportError as e:
@@ -230,7 +230,7 @@ class AIManager:
         except BlockedPromptException as e:
             self.logger.error("Prompt was blocked: %s", str(e))
             return None
-        except genai.ApiError as e:
+        except genai.genai.ApiError as e:
             self.logger.error("API error occurred: %s", str(e))
             return None
         except Exception as e:

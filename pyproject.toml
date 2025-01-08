@@ -8,65 +8,73 @@ version = "0.1.0"
 description = "AI-assisted development toolkit for automated code improvement"
 authors = ["privatedick <privatedick@users.noreply.github.com>"]
 readme = "README.md"
-license = "Proprietary"
-repository = "https://github.com/privatedick/rogue"
 packages = [
-    { include = "src" },
+    { include = "src" }
 ]
 classifiers = [
     "Private :: Do Not Upload",
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Operating System :: OS Independent",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Topic :: Software Development :: Code Generators",
-    "Topic :: Software Development :: Libraries :: Application Frameworks",
 ]
 
 [tool.poetry.dependencies]
 python = ">=3.11,<4.0"
 
-# Core dependencies
+# AI och ML
+google-generativeai = "^0.8.3"
+python-dotenv = "^1.0"
+
+# System och monitoring
+psutil = "^6.1.1"
+
+# Filhantering och övervakning
+watchdog = "^3.0"
+pathspec = "^0.11.0"
+aiosqlite = "^0.19.0"
+
+# CLI och UI
 click = "^8.0"
 rich = "^13.0"
 typer = "^0.9.0"
 
-# AI and ML
-google-generativeai = "^0.8.0"
-python-dotenv = "^1.0"
-
-# File operations
-watchdog = "^3.0"
-pathspec = "^0.11.0"
-
-# Data handling
+# Data och konfiguration
 pydantic = "^2.0"
 tomli = "^2.0"
 tomli-w = "^1.0"
 
-# Async support
+# Asynkron support
 aiohttp = "^3.9.0"
 asyncio = "^3.4.3"
+tenacity = "^8.0"
+
+# Loggning och monitoring
 loguru = "^0.7.3"
+
+# Code analysis och formattering
+black = "^24.10.0"
+
+# Dokumentation
 sphinx = "^8.1.3"
-tenacity = "^9.0.0"
-google-genai = "^0.3.0"
-aiosqlite = "^0.20.0"
+sphinx-rtd-theme = "^3.0.2"  # Tillagd för dokumentationstema
 
 [tool.poetry.group.dev.dependencies]
-# Modern linting och formattering
+# Linting och formattering
 ruff = "^0.3.0"
-black = "^24.0"
 mypy = "^1.0"
+pylint = "^3.0"  # Tillagd för utökad linting
 
 # Testing
 pytest = "^7.0"
 pytest-asyncio = "^0.21.0"
 pytest-cov = "^4.0"
 pytest-sugar = "^0.9.7"
+pytest-timeout = "^2.2.0"  # Tillagd för test timeouts
+pytest-xdist = "^3.5.0"  # Tillagd för parallella tester
 hypothesis = "^6.0"
 
 # Development tools
@@ -79,10 +87,8 @@ quick = "src.tools.quick:cli"
 rogue = "src.tools.quick:cli"
 
 [tool.ruff]
-target-version = "py39"
+target-version = "py311"
 line-length = 88
-
-[tool.ruff.lint]
 select = [
     "E",   # pycodestyle errors
     "W",   # pycodestyle warnings
@@ -92,15 +98,17 @@ select = [
     "C",   # flake8-comprehensions
     "UP",  # pyupgrade
     "N",   # pep8-naming
+    "COM", # flake8-commas
     "T20", # flake8-print
     "PT",  # flake8-pytest-style
     "RET", # flake8-return
     "SIM", # flake8-simplify
+    "ARG", # flake8-unused-arguments
+    "DTZ", # flake8-datetimez
 ]
 ignore = [
     "E501",  # Låt black hantera linjelängder
     "B008",  # Do not perform function call in argument defaults
-    "COM812", # Trailing comma konflikt med formatter
 ]
 unfixable = [
     "T20",  # Don't auto-remove print statements
@@ -112,30 +120,33 @@ exclude = [
     "__pycache__",
     "build",
     "dist",
+    "docs/conf.py",
 ]
 
-[tool.ruff.lint.per-file-ignores]
+[tool.ruff.per-file-ignores]
 "__init__.py" = ["F401", "F403"]
 "tests/*" = ["T20"]
+"scripts/*" = ["T20"]
 
-[tool.ruff.lint.isort]
+[tool.ruff.isort]
 known-first-party = ["src"]
 section-order = ["future", "standard-library", "third-party", "first-party", "local-folder"]
 combine-as-imports = true
 
 [tool.black]
 line-length = 88
-target-version = ["py39", "py310", "py311"]
+target-version = ["py311", "py312"]
 include = '\.pyi?$'
 extend-exclude = '''
 (
     tests/data/
     | .*/migrations/
+    | docs/conf.py
 )
 '''
 
 [tool.mypy]
-python_version = "3.9"
+python_version = "3.11"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
@@ -151,6 +162,9 @@ exclude = [
     'tests/data/',
     'docs/conf.py',
 ]
+plugins = [
+    "pydantic.mypy"
+]
 
 [[tool.mypy.overrides]]
 module = "tests.*"
@@ -160,13 +174,15 @@ check_untyped_defs = false
 [tool.pytest.ini_options]
 minversion = "6.0"
 addopts = """
-    -ra
+    -ra 
     -q
     --cov=src
     --cov-report=term-missing
     --cov-report=html
     --cov-report=xml
     --no-cov-on-fail
+    --durations=10
+    --timeout=300
 """
 testpaths = ["tests"]
 asyncio_mode = "auto"
@@ -175,7 +191,7 @@ filterwarnings = [
     "ignore::UserWarning",
 ]
 markers = [
-    "slow: marks tests as slow",
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests as integration tests",
     "e2e: marks tests as end-to-end tests",
 ]
@@ -186,7 +202,9 @@ source = ["src"]
 omit = [
     "tests/*",
     "**/__init__.py",
+    "docs/conf.py",
 ]
+concurrency = ["multiprocessing", "thread"]
 
 [tool.coverage.report]
 exclude_lines = [
@@ -199,9 +217,11 @@ exclude_lines = [
     "pass",
 ]
 fail_under = 80
+show_missing = true
 
 [tool.coverage.html]
 directory = "coverage_html"
+title = "Rogue Coverage Report"
 
 [tool.coverage.xml]
 output = "coverage.xml"

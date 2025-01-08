@@ -1,194 +1,275 @@
-import asyncio
+"""Unit tests for the thought management system.
+
+This module provides comprehensive testing of the thought management system,
+including storage, validation, and error handling. It uses pytest-asyncio
+for testing asynchronous functionality.
+"""
+
+import json
+import os
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict
+
 import pytest
-from datetime import datetime, timedelta
-from src.ai_core.thoughts_manager import Thought, ThoughtProcessor, ThoughtRepository, ThoughtsManager, ValidationError, StorageError, ProcessingError
-from typing import List
-import sqlite3
+import aiosqlite
+
+from src.ai_core.thoughts_manager import (
+    Thought,
+    ThoughtsManager,
+    ThoughtRepository,
+    StorageError,
+    ValidationError
+)
+
 
 @pytest.fixture
-def in_memory_manager() -> ThoughtsManager:
-    """Fixture that creates a ThoughtsManager with an in-memory database."""
-    return ThoughtsManager(":memory:")
+async def test_db_path(tmp_path: Path) -> Path:
+    """Provide a temporary database path.
+
+    Args:
+        tmp_path: Pytest fixture for temporary directory
+
+    Returns:
+        Path: Path to test database
+    """
+    return tmp_path / "test_thoughts.db"
+
+
+@pytest.fixture
+async def thought_repository(test_db_path: Path) -> ThoughtRepository:
+    """Create a thought repository for testing.
+
+    Args:
+        test_db_path: Path to test database
+
+    Returns:
+        ThoughtRepository: Initialized repository
+    """
+    repo = ThoughtRepository(str(test_db_path))
+    await repo.initialize()
+    return repo
+
+
+@pytest.fixture
+async def thoughts_manager(test_db_path: Path) -> ThoughtsManager:
+    """Create a thoughts manager for testing.
+
+    Args:
+        test_db_path: Path to test database
+
+    Returns:
+        ThoughtsManager: Initialized manager
+    """
+    manager = ThoughtsManager(str(test_db_path), {"model": "test-model"})
+    await manager.initialize()
+    return manager
+
+
+@pytest.fixture
+def sample_thought() -> Dict[str, Any]:
+    """Provide sample thought data.
+
+    Returns:
+        Dict[str, Any]: Sample thought data
+    """
+    return {
+        "content": "Test thought content",
+        "model": "test-model",
+        "context": {"test": "context"},
+        "metadata": {"test": "metadata"},
+        "category": "test",
+        "confidence": 0.95,
+        "related_code": "def test(): pass"
+    }
 
 
 @pytest.mark.asyncio
-async def test_thought_processing(in_memory_manager: ThoughtsManager) -> None:
-    """Test thought processing and validation."""
-    processor = in_memory_manager.processor
-    
-    # Test a valid thought.
-    valid_thought = processor.process(
-        content="Valid thought content",
+async def test_thought_validation():
+    """Test thought validation logic."""
+    # Valid thought
+    thought = Thought(
+        content="Valid content",
         model="test-model",
-        context={"key": "value"}
+        context={"valid": "context"}
     )
-    assert isinstance(valid_thought, Thought)
-    assert valid_thought.content == "Valid thought content"
-    assert valid_thought.model == "test-model"
-    assert valid_thought.context == {"key": "value"}
+    await thought.validate()  # Should not raise
 
-    # Test for empty content.
-    with pytest.raises(ValidationError, match="content") as excinfo:
-        processor.process(
-            content="",
-            model="test-model",
-            context={"key": "value"}
-        )
+    # Empty content
+    with pytest.raises(ValidationError) as exc_info:
+        thought = Thought(content="", model="test-model")
+        await thought.validate()
+    assert "content" in str(exc_info.value)
 
-    # Test for empty model.
-    with pytest.raises(ValidationError, match="model") as excinfo:
-        processor.process(
-            content="Valid content",
-            model="",
-            context={"key": "value"}
-        )
-
-    # Test for invalid context.
-    with pytest.raises(ValidationError, match="context") as excinfo:
-         processor.process(
-            content="Valid content",
-            model="test-model",
-            context="not a dict" # type: ignore
-        )
-    
-@pytest.mark.asyncio
-async def test_thought_storage_and_retrieval(in_memory_manager: ThoughtsManager) -> None:
-   """Test thought storage and retrieval."""
-   repo = in_memory_manager.repository
-
-   # Create a thought object
-   thought = Thought(
-      id=None,
-      content="Test content for storage and retrieval",
-      model="test_model",
-      context={"key": "value"},
-      created_at=datetime.now(),
-      metadata = {"meta": "meta_value"}
-   )
-  
-   # Save the thought
-   thought_id = await repo.save(thought)
-   assert isinstance(thought_id, int)
-
-   # Test retrieve by ID
-   stored_thought = await repo.get_by_id(thought_id)
-   assert stored_thought is not None
-   assert isinstance(stored_thought, Thought)
-   assert stored_thought.content == thought.content
-   assert stored_thought.model == thought.model
-   assert stored_thought.context == thought.context
-   assert stored_thought.metadata == thought.metadata
-
-   # Test retrieval of a non-existent thought
-   non_existent_thought = await repo.get_by_id(999)
-   assert non_existent_thought is None
-
-   # Test StorageError
-   with pytest.raises(StorageError, match="SQL"):
-      async with repo.db as conn:
-        conn.execute("SELECT * FROM non_existent_table")
-
-@pytest.mark.asyncio
-async def test_full_thought_cycle(in_memory_manager: ThoughtsManager) -> None:
-  """Test full thought cycle including processing, saving, and retrieval."""
-  
-  # Create test thought data
-  test_data = {
-       "content": "Full cycle test content",
-       "model": "full-cycle-model",
-       "context": {"test": "full"},
-       "metadata": {"full": True},
-  }
-
-  # Save thought
-  thought_id = await in_memory_manager.save_thought(**test_data)
-  assert isinstance(thought_id, int)
-
-  # Search thought with fulltext
-  thoughts_search = await in_memory_manager.search_thoughts(query="cycle")
-  assert len(thoughts_search) == 1
-  assert isinstance(thoughts_search[0], Thought)
-  assert thoughts_search[0].content == test_data["content"]
-  assert thoughts_search[0].model == test_data["model"]
-  assert thoughts_search[0].context == test_data["context"]
-  assert thoughts_search[0].metadata == test_data["metadata"]
-
-  # Search with model
-  thoughts_search_model = await in_memory_manager.search_thoughts(query="cycle", model="full-cycle-model")
-  assert len(thoughts_search_model) == 1
-  assert isinstance(thoughts_search_model[0], Thought)
-  assert thoughts_search_model[0].content == test_data["content"]
-  assert thoughts_search_model[0].model == test_data["model"]
-  assert thoughts_search_model[0].context == test_data["context"]
-  assert thoughts_search_model[0].metadata == test_data["metadata"]
-
-  # Search with a date range
-  now = datetime.now()
-  thoughts_search_date = await in_memory_manager.search_thoughts(query="cycle", start_date=now-timedelta(seconds=1), end_date=now+timedelta(seconds=1))
-  assert len(thoughts_search_date) == 1
-  assert isinstance(thoughts_search_date[0], Thought)
-  assert thoughts_search_date[0].content == test_data["content"]
-  assert thoughts_search_date[0].model == test_data["model"]
-  assert thoughts_search_date[0].context == test_data["context"]
-  assert thoughts_search_date[0].metadata == test_data["metadata"]
-
-  # Verify that the thoughts are ordered by time
-  thoughts_history = await in_memory_manager.get_thought_history(limit=10)
-  assert len(thoughts_history) == 1
-  assert isinstance(thoughts_history[0], Thought)
-  assert thoughts_history[0].content == test_data["content"]
-  assert thoughts_history[0].model == test_data["model"]
-  assert thoughts_history[0].context == test_data["context"]
-  assert thoughts_history[0].metadata == test_data["metadata"]
-
-  # Verify that validation is working on save
-  with pytest.raises(ValidationError, match="content"):
-        await in_memory_manager.save_thought(
-              content="",
-              model="cycle-model",
-              context={"test": "full"}
-          )
+    # Missing model
+    with pytest.raises(ValidationError) as exc_info:
+        thought = Thought(content="Content", model="")
+        await thought.validate()
+    assert "model" in str(exc_info.value)
 
 
 @pytest.mark.asyncio
-async def test_database_integrity(in_memory_manager: ThoughtsManager) -> None:
-   """Tests that database integrity is maintained."""
-   assert await in_memory_manager.verify_database_integrity()
-  
-   # Test with a corrupted database.
-   db_path = "test_corrupted.db"
-   manager_corrupted = ThoughtsManager(db_path)
-   try:
-       async with manager_corrupted.repository.db as conn:
-            conn.execute("DROP TABLE IF EXISTS thoughts") # corrupt databasen
-            await manager_corrupted.verify_database_integrity() # tests that the database has been correctly recreated
-            assert await manager_corrupted.verify_database_integrity()
-   finally:
-        import os
-        if os.path.exists(db_path):
-          os.remove(db_path)
+async def test_save_and_get_thought(
+    thoughts_manager: ThoughtsManager,
+    sample_thought: Dict[str, Any]
+):
+    """Test saving and retrieving thoughts.
+
+    Args:
+        thoughts_manager: Manager instance
+        sample_thought: Sample thought data
+    """
+    # Save thought
+    thought_id = await thoughts_manager.save_thought(**sample_thought)
+    assert thought_id is not None
+
+    # Retrieve thought
+    thought = await thoughts_manager.get_thought(thought_id)
+    assert thought is not None
+    assert thought.content == sample_thought["content"]
+    assert thought.model == sample_thought["model"]
+    assert thought.context == sample_thought["context"]
+    assert thought.metadata == sample_thought["metadata"]
+    assert thought.category == sample_thought["category"]
+    assert thought.confidence == sample_thought["confidence"]
+    assert thought.related_code == sample_thought["related_code"]
 
 
 @pytest.mark.asyncio
-async def test_database_transaction(in_memory_manager: ThoughtsManager) -> None:
-  """Tests that database transaction management works."""
-  repo = in_memory_manager.repository
-  
-  # create thought
-  thought = Thought(
-      id=None,
-      content="Test transaction",
-      model="test-model",
-      context={},
-      created_at=datetime.now(),
+async def test_delete_thought(
+    thoughts_manager: ThoughtsManager,
+    sample_thought: Dict[str, Any]
+):
+    """Test thought deletion.
+
+    Args:
+        thoughts_manager: Manager instance
+        sample_thought: Sample thought data
+    """
+    # Save and then delete
+    thought_id = await thoughts_manager.save_thought(**sample_thought)
+    assert await thoughts_manager.delete_thought(thought_id)
+
+    # Verify deletion
+    thought = await thoughts_manager.get_thought(thought_id)
+    assert thought is None
+
+
+@pytest.mark.asyncio
+async def test_search_thoughts(
+    thoughts_manager: ThoughtsManager,
+    sample_thought: Dict[str, Any]
+):
+    """Test thought search functionality.
+
+    Args:
+        thoughts_manager: Manager instance
+        sample_thought: Sample thought data
+    """
+    # Save multiple thoughts
+    await thoughts_manager.save_thought(**sample_thought)
+    await thoughts_manager.save_thought(
+        content="Another thought",
+        model="test-model",
+        context={"test": "context"}
     )
 
-  try:
-        async with repo.db.transaction() as conn:
-            await repo.save(thought)
-            conn.execute("SELECT * FROM non_existent_table") # force a failure in transaction, the save should rollback
-  except StorageError:
-        pass
+    # Search by content
+    results = await thoughts_manager.search_thoughts(
+        query="test",
+        model="test-model"
+    )
+    assert len(results) >= 1
+    assert any(t.content == sample_thought["content"] for t in results)
+
+
+@pytest.mark.asyncio
+async def test_get_thought_history(
+    thoughts_manager: ThoughtsManager,
+    sample_thought: Dict[str, Any]
+):
+    """Test retrieving thought history.
+
+    Args:
+        thoughts_manager: Manager instance
+        sample_thought: Sample thought data
+    """
+    # Save thoughts with different categories
+    await thoughts_manager.save_thought(**sample_thought)
+    await thoughts_manager.save_thought(
+        content="Another thought",
+        model="test-model",
+        context={"test": "context"},
+        category="different"
+    )
+
+    # Get history filtered by category
+    history = await thoughts_manager.get_thought_history(
+        category=sample_thought["category"]
+    )
+    assert len(history) == 1
+    assert history[0].category == sample_thought["category"]
+
+
+@pytest.mark.asyncio
+async def test_export_thoughts(
+    thoughts_manager: ThoughtsManager,
+    sample_thought: Dict[str, Any],
+    tmp_path: Path
+):
+    """Test thought export functionality.
+
+    Args:
+        thoughts_manager: Manager instance
+        sample_thought: Sample thought data
+        tmp_path: Temporary directory path
+    """
+    # Save some thoughts
+    await thoughts_manager.save_thought(**sample_thought)
+
+    # Test JSON export
+    json_path = tmp_path / "thoughts.json"
+    success = await thoughts_manager.export_thoughts(json_path, "json")
+    assert success
+    assert json_path.exists()
+
+    # Verify JSON content
+    with open(json_path) as f:
+        exported = json.load(f)
+        assert len(exported) >= 1
+        assert any(t["content"] == sample_thought["content"] for t in exported)
+
+    # Test CSV export
+    csv_path = tmp_path / "thoughts.csv"
+    success = await thoughts_manager.export_thoughts(csv_path, "csv")
+    assert success
+    assert csv_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_error_handling(thoughts_manager: ThoughtsManager):
+    """Test error handling in thought management."""
+    # Test invalid thought
+    with pytest.raises(ValidationError):
+        await thoughts_manager.save_thought(
+            content="",  # Empty content should fail
+            model="test-model",
+            context={}
+        )
+
+    # Test invalid search
+    with pytest.raises(StorageError):
+        await thoughts_manager.search_thoughts(query="")
     
-  retrieved_thought = await repo.get_by_id(thought.id or 999)
-  assert retrieved_thought is None
+    # Test invalid export format
+    output_path = Path("test.txt")
+    success = await thoughts_manager.export_thoughts(output_path, "invalid")
+    assert not success
+
+
+@pytest.mark.asyncio
+async def test_cleanup(thoughts_manager: ThoughtsManager):
+    """Test resource cleanup."""
+    await thoughts_manager.cleanup()
+    # Verify no lingering connections or resources
+    # This mainly tests that cleanup doesn't raise exceptions
